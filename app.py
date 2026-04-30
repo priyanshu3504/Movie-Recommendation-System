@@ -2,7 +2,6 @@ import pickle
 import streamlit as st
 import requests
 import os
-# from .env import API_KEY
 from dotenv import load_dotenv
 
 load_dotenv()
