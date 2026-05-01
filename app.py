@@ -1,65 +1,52 @@
 import streamlit as st
 import pickle
 import requests
-import pandas as pd
-
 import os
+import gdown
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 load_dotenv()
 
-
-# ─────────────────────────────────────────────
 #  Page config
-# ─────────────────────────────────────────────
 st.set_page_config(
     page_title="Movie Recommender",
     page_icon="🎬",
     layout="wide",
 )
 
-# ─────────────────────────────────────────────
 #  Custom CSS  – cinematic dark theme
-# ─────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&display=swap');
 
-/* ── Root palette ── */
 :root {
     --bg:        #0b0c10;
     --surface:   #14151a;
     --card:      #1c1d25;
     --accent:    #e5383b;
     --accent2:   #ff6b35;
-    --gold:      #f4c430;
     --text:      #e8e8f0;
     --muted:     #6b6c7e;
     --border:    rgba(255,255,255,0.07);
 }
 
-/* ── Global ── */
 html, body, [data-testid="stAppViewContainer"] {
     background: var(--bg) !important;
     color: var(--text) !important;
     font-family: 'DM Sans', sans-serif;
 }
-
 [data-testid="stHeader"] { background: transparent !important; }
 [data-testid="stSidebar"] { display: none; }
-
-/* ── Hide Streamlit branding ── */
 #MainMenu, footer, header { visibility: hidden; }
 
-/* ── Main wrapper ── */
 .main .block-container {
-    padding: 2rem 3rem 4rem !important;
+    padding: 0rem 3rem 4rem !important;
     max-width: 1200px;
 }
 
-/* ── Hero heading ── */
 .hero {
     text-align: center;
-    padding: 3.5rem 0 2.5rem;
+    padding: 0.5rem 0 2.5rem;
     position: relative;
 }
 .hero::before {
@@ -73,7 +60,6 @@ html, body, [data-testid="stAppViewContainer"] {
     pointer-events: none;
 }
 .hero-label {
-    font-family: 'DM Sans', sans-serif;
     font-size: 0.75rem;
     font-weight: 500;
     letter-spacing: 0.35em;
@@ -89,17 +75,22 @@ html, body, [data-testid="stAppViewContainer"] {
     letter-spacing: 0.04em;
     margin: 0;
 }
-.hero-title span {
-    color: var(--accent);
-}
+.hero-title span { color: var(--accent); }
 .hero-sub {
     margin-top: 1rem;
     color: var(--muted);
     font-size: 1rem;
     font-weight: 300;
 }
+            
+.hero-sub-drink {
+    color: var(--muted);
+    font-weight: 300;
+    margin-top: 0.5rem;
+    font-size: 4rem;      /* ← increase this to make 🥂 bigger */
+    text-align: center;
+}
 
-/* ── Divider ── */
 .divider {
     height: 1px;
     background: linear-gradient(90deg,
@@ -109,7 +100,6 @@ html, body, [data-testid="stAppViewContainer"] {
     opacity: 0.6;
 }
 
-/* ── Search card ── */
 .search-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -120,7 +110,6 @@ html, body, [data-testid="stAppViewContainer"] {
     box-shadow: 0 8px 40px rgba(0,0,0,0.45);
 }
 
-/* ── Streamlit selectbox overrides ── */
 [data-testid="stSelectbox"] > div > div {
     background: var(--card) !important;
     border: 1px solid rgba(229,56,59,0.4) !important;
@@ -136,7 +125,6 @@ html, body, [data-testid="stAppViewContainer"] {
     margin-bottom: 0.4rem !important;
 }
 
-/* ── Button ── */
 .stButton > button {
     background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%) !important;
     color: #fff !important;
@@ -157,7 +145,6 @@ html, body, [data-testid="stAppViewContainer"] {
     box-shadow: 0 8px 28px rgba(229,56,59,0.5) !important;
 }
 
-/* ── Section heading ── */
 .section-heading {
     font-family: 'Bebas Neue', sans-serif;
     font-size: 1.8rem;
@@ -168,7 +155,6 @@ html, body, [data-testid="stAppViewContainer"] {
 }
 .section-heading span { color: var(--accent); }
 
-/* ── Movie cards row ── */
 .movie-grid {
     display: flex;
     gap: 1.2rem;
@@ -195,9 +181,7 @@ html, body, [data-testid="stAppViewContainer"] {
     object-fit: cover;
     display: block;
 }
-.movie-card-info {
-    padding: 0.75rem 0.8rem;
-}
+.movie-card-info { padding: 0.75rem 0.8rem; }
 .movie-card-title {
     font-size: 0.82rem;
     font-weight: 500;
@@ -216,11 +200,7 @@ html, body, [data-testid="stAppViewContainer"] {
     border-radius: 20px;
     margin-bottom: 0.35rem;
 }
-
-/* ── Spinner override ── */
 [data-testid="stSpinner"] { color: var(--accent) !important; }
-
-/* ── Error / info ── */
 [data-testid="stAlert"] {
     background: rgba(229,56,59,0.1) !important;
     border: 1px solid rgba(229,56,59,0.3) !important;
@@ -230,120 +210,112 @@ html, body, [data-testid="stAppViewContainer"] {
 """, unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────
-#  Load data
-# ─────────────────────────────────────────────
-@st.cache_resource
+@st.cache_resource(show_spinner="Loading model… (one-time download)")
 def load_data():
-    movies = pickle.load(open("movie_list.pkl", "rb"))
-    similarity = pickle.load(open("similarity.pkl", "rb"))
+    os.makedirs("model", exist_ok=True)
+
+    if not os.path.exists("model/movie_list.pkl"):
+        gdown.download(
+            "https://drive.google.com/uc?id=100SZg4E6wpLzl2iJBnpcC56sLSKVYu9A",
+            "model/movie_list.pkl", quiet=False
+        )
+    if not os.path.exists("model/similarity.pkl"):
+        gdown.download(
+            "https://drive.google.com/uc?id=17AIMkqwvFHL6DCjd51LkzvShTo31amGs",
+            "model/similarity.pkl", quiet=False
+        )
+
+    with open("model/movie_list.pkl", "rb") as f:
+        movies = pickle.load(f)
+    with open("model/similarity.pkl", "rb") as f:
+        similarity = pickle.load(f)
     return movies, similarity
 
 try:
     movies, similarity = load_data()
-except FileNotFoundError as e:
-    st.error(f"Could not load model files: {e}. Make sure `movie_list.pkl` and `similarity.pkl` are in the same directory.")
+except Exception as e:
+    st.error(f"Could not load model files: {e}")
     st.stop()
 
 
-# ─────────────────────────────────────────────
-#  TMDB API helper
-#  👉  Replace YOUR_API_KEY_HERE with your key
-# ─────────────────────────────────────────────
-TMDB_API_KEY = os.getenv("API_KEY")
+#  TMDB API
+TMDB_API_KEY  = os.getenv("API_KEY")
 TMDB_BASE_URL = "https://api.themoviedb.org/3/movie/{}?api_key={}&language=en-US"
-POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
-
-# Reliable inline SVG fallback (no external request needed)
-FALLBACK_POSTER = (
+POSTER_BASE   = "https://image.tmdb.org/t/p/w500"
+FALLBACK      = (
     "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' "
     "width='500' height='750' viewBox='0 0 500 750'%3E"
     "%3Crect width='500' height='750' fill='%231c1d25'/%3E"
     "%3Ctext x='50%25' y='45%25' font-family='sans-serif' font-size='48' "
-    "fill='%23e5383b' text-anchor='middle'%3E🎬%3C/text%3E"
+    "fill='%23e5383b' text-anchor='middle'%3E%F0%9F%8E%AC%3C/text%3E"
     "%3Ctext x='50%25' y='57%25' font-family='sans-serif' font-size='20' "
-    "fill='%236b6c7e' text-anchor='middle'%3ENo Poster%3C/text%3E"
+    "fill='%236b6c7e' text-anchor='middle'%3ENo+Poster%3C/text%3E"
     "%3C/svg%3E"
 )
 
 @st.cache_data(ttl=3600)
 def fetch_poster(movie_id: int) -> str:
-    """Return poster URL for a given TMDB movie_id."""
-    import time
-    time.sleep(0.25)              # 250 ms gap — stays well under TMDB's 40 req/10s limit
     try:
-        url = TMDB_BASE_URL.format(movie_id, TMDB_API_KEY)
-        response = requests.get(url, timeout=8)
-        if response.status_code == 429:          # rate-limited — wait and retry once
-            time.sleep(2)
-            response = requests.get(url, timeout=8)
-        if response.status_code != 200:
-            return FALLBACK_POSTER
-        data = response.json()
-        poster_path = data.get("poster_path")
-        if poster_path:
-            return POSTER_BASE_URL + poster_path
+        url  = TMDB_BASE_URL.format(movie_id, TMDB_API_KEY)
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            path = resp.json().get("poster_path")
+            if path:
+                return POSTER_BASE + path
     except Exception:
         pass
-    return FALLBACK_POSTER
+    return FALLBACK
 
 
-# ─────────────────────────────────────────────
-#  Recommendation logic
-# ─────────────────────────────────────────────
+
 def recommend(movie_title: str):
-    """Return list of (title, poster_url) for top-5 similar movies."""
-    idx = movies[movies["title"] == movie_title].index[0]
+    idx       = movies[movies["title"] == movie_title].index[0]
     distances = sorted(
         list(enumerate(similarity[idx])),
-        reverse=True,
-        key=lambda x: x[1],
+        reverse=True, key=lambda x: x[1]
     )
-    # Collect movie info first
+
     top5 = []
-    for i in distances[1:6]:          # skip index 0 (the movie itself)
-        movie_id = movies.iloc[i[0]].movie_id
-        title    = movies.iloc[i[0]].title
-        top5.append((title, movie_id))
+    for i in distances[1:6]:
+        top5.append((
+            movies.iloc[i[0]].title,
+            int(movies.iloc[i[0]].movie_id),
+        ))
 
-    # Fetch posters sequentially (0.25s apart) to avoid rate limiting
-    results = []
-    for title, movie_id in top5:
-        poster = fetch_poster(movie_id)
-        results.append((title, poster))
-    return results
+    
+    posters = [FALLBACK] * 5
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_idx = {
+            executor.submit(fetch_poster, mid): i
+            for i, (_, mid) in enumerate(top5)
+        }
+        for future in as_completed(future_to_idx):
+            posters[future_to_idx[future]] = future.result()
+
+    return [(title, poster) for (title, _), poster in zip(top5, posters)]
 
 
-# ─────────────────────────────────────────────
-#  UI
-# ─────────────────────────────────────────────
-
-# ── Hero ──────────────────────────────────────
+# UI
 st.markdown("""
 <div class="hero">
-    <div class="hero-label">✦ AI-Powered Discovery ✦</div>
     <h1 class="hero-title">Movie<br><span>Recommender</span></h1>
-    <p class="hero-sub">Find your next favourite film in seconds</p>
+    <p class="hero-sub">🍿 || Find your next favourite film in Minutes 😎 || 🍿</p>
+    <p class="hero-sub-drink">🥂</p>
 </div>
-<div class="divider"></div>
+
 """, unsafe_allow_html=True)
 
-# ── Search card ───────────────────────────────
-st.markdown('<div class="search-card">', unsafe_allow_html=True)
 
-movie_list = movies["title"].values
+
 selected_movie = st.selectbox(
     "🎬  Search or select a movie",
-    movie_list,
+    movies["title"].values,
     index=None,
     placeholder="Type a movie name…",
 )
-
 recommend_btn = st.button("✦  Get Recommendations")
-
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Results ───────────────────────────────────
 if recommend_btn:
     if not selected_movie:
         st.warning("Please select a movie first.")
@@ -352,17 +324,15 @@ if recommend_btn:
             f'<div class="section-heading">Because you liked <span>{selected_movie}</span></div>',
             unsafe_allow_html=True,
         )
-
-        with st.spinner("Fetching recommendations…"):
+        with st.spinner("Finding your next favourites…"):
             recommendations = recommend(selected_movie)
 
-        # Build HTML movie grid
         cards_html = '<div class="movie-grid">'
         for rank, (title, poster) in enumerate(recommendations, start=1):
             cards_html += f"""
             <div class="movie-card">
                 <img src="{poster}" alt="{title}"
-                     onerror="this.onerror=null;this.src='https://placehold.co/500x750/1c1d25/e5383b?text=No+Poster';"/>
+                     onerror="this.onerror=null;this.src='{FALLBACK}';"/>
                 <div class="movie-card-info">
                     <div style="text-align:center">
                         <span class="rank-badge">#{rank}</span>
@@ -371,5 +341,4 @@ if recommend_btn:
                 </div>
             </div>"""
         cards_html += '</div>'
-
         st.markdown(cards_html, unsafe_allow_html=True)
